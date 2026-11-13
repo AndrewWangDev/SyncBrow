@@ -50,6 +50,7 @@ import androidx.navigation.NavController
 import com.syncbrow.tool.MainActivity
 import com.syncbrow.tool.R
 import com.syncbrow.tool.data.*
+import com.syncbrow.tool.net.LocalDohProxy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import okhttp3.ConnectionPool
@@ -163,6 +164,16 @@ fun BrowserScreen(navController: NavController, initialUrl: String? = null) {
     var showShortcutDialog by remember { mutableStateOf(false) }
     var shortcutName by remember { mutableStateOf("") }
     var currentFavicon by remember { mutableStateOf<Bitmap?>(null) }
+
+    var dohFailureHost by remember { mutableStateOf<String?>(null) }
+    var showDohFailureDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        LocalDohProxy.dohFailureEvent.collect { failedHost ->
+            dohFailureHost = failedHost
+            showDohFailureDialog = true
+        }
+    }
 
     // Password Manager states for Browser
     val pmEncryptionEnabled by settingsRepository.pmEncryptionEnabledFlow.collectAsState(initial = false)
@@ -542,7 +553,7 @@ fun BrowserScreen(navController: NavController, initialUrl: String? = null) {
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             val url = request?.url ?: return false
                             val urlString = url.toString()
-                            val scheme = url.scheme
+                            val scheme = url.scheme?.lowercase() ?: return false
                             
                             // Proactive download check: if URL ends with common extension, log it but don't record in DB here 
                             // recording should happen ONLY in DownloadListener to avoid duplicates
@@ -553,14 +564,50 @@ fun BrowserScreen(navController: NavController, initialUrl: String? = null) {
                             if (scheme == "http" || scheme == "https") {
                                 return false // Handle within WebView
                             }
-                            // For other schemes (intent, tel, etc.), return true to block or handle manually
-                            return try {
-                                val intent = Intent(Intent.ACTION_VIEW, url)
-                                context.startActivity(intent)
-                                true
-                            } catch (_: Exception) {
-                                true // We "handled" it by failing quietly
+
+                            // Block dangerous schemes completely (SEC-04)
+                            if (scheme in listOf("file", "content", "javascript", "data", "blob")) {
+                                Log.w("BrowserScreen", "Blocked dangerous URL scheme: $scheme")
+                                return true
                             }
+
+                            // Whitelist safe external schemes (SEC-04)
+                            if (scheme in listOf("tel", "mailto", "sms", "geo")) {
+                                return try {
+                                    val intent = Intent(Intent.ACTION_VIEW, url).apply {
+                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                    }
+                                    context.startActivity(intent)
+                                    true
+                                } catch (_: Exception) {
+                                    true
+                                }
+                            }
+
+                            // Sanitize and handle intent:// URLs safely (SEC-04)
+                            if (scheme == "intent") {
+                                return try {
+                                    val intent = Intent.parseUri(urlString, Intent.URI_INTENT_SCHEME).apply {
+                                        addCategory(Intent.CATEGORY_BROWSABLE)
+                                        component = null
+                                        selector = null
+                                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                                    }
+                                    if (intent.resolveActivity(context.packageManager) != null) {
+                                        context.startActivity(intent)
+                                    } else {
+                                        val fallbackUrl = intent.getStringExtra("browser_fallback_url")
+                                        if (fallbackUrl != null && (fallbackUrl.startsWith("http://") || fallbackUrl.startsWith("https://"))) {
+                                            view?.loadUrl(fallbackUrl)
+                                        }
+                                    }
+                                    true
+                                } catch (_: Exception) {
+                                    true
+                                }
+                            }
+
+                            return true // Block any unknown or unsupported custom schemes
                         }
 
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -627,17 +674,11 @@ fun BrowserScreen(navController: NavController, initialUrl: String? = null) {
                             if (request == null) return null
                             val host = request.url.host?.lowercase() ?: ""
 
-                            fun matchesDomain(target: String): Boolean =
-                                host == target || host.endsWith(".$target")
-
-                            val isExempt = matchesDomain("google.com") || matchesDomain("bing.com") || 
-                                           matchesDomain("microsoft.com") || matchesDomain("apple.com") ||
-                                           matchesDomain("github.com")
-
-                            if (!isExempt && BrowserSettingsHolder.adBlockEnabled && BlockList.shouldBlockAd(host)) {
+                            // Prioritize ad & tracker blocking before domain exemption checks (SEC-05)
+                            if (BrowserSettingsHolder.adBlockEnabled && BlockList.shouldBlockAd(host)) {
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
                             }
-                            if (!isExempt && BrowserSettingsHolder.trackerBlockEnabled && BlockList.shouldBlockTracker(host)) {
+                            if (BrowserSettingsHolder.trackerBlockEnabled && BlockList.shouldBlockTracker(host)) {
                                 return WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream("".toByteArray()))
                             }
 
@@ -721,6 +762,45 @@ fun BrowserScreen(navController: NavController, initialUrl: String? = null) {
         }
     }
 }
+
+    if (showDohFailureDialog && dohFailureHost != null) {
+        val failedHost = dohFailureHost ?: ""
+        AlertDialog(
+            onDismissRequest = {
+                showDohFailureDialog = false
+            },
+            title = {
+                Text(stringResource(R.string.doh_failure_dialog_title))
+            },
+            text = {
+                Text(stringResource(R.string.doh_failure_dialog_desc, failedHost))
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDohFailureDialog = false
+                        scope.launch(Dispatchers.IO) {
+                            settingsRepository.setDohEnabled(false)
+                        }
+                        Toast.makeText(context, context.getString(R.string.doh_switched_to_cleartext), Toast.LENGTH_SHORT).show()
+                        webView.reload()
+                    }
+                ) {
+                    Text(stringResource(R.string.doh_action_use_cleartext))
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showDohFailureDialog = false
+                        Toast.makeText(context, context.getString(R.string.doh_kept_secure), Toast.LENGTH_SHORT).show()
+                    }
+                ) {
+                    Text(stringResource(R.string.doh_action_keep_secure))
+                }
+            }
+        )
+    }
 
     if (showShortcutDialog) {
         AlertDialog(

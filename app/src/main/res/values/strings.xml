@@ -176,4 +176,10 @@
     <string name="scan_result_share">Share</string>
     <string name="pm_reencrypt_failed">Password migration failed. Changes reverted.</string>
     <string name="settings_doh_unsupported">Device WebView does not support proxy override</string>
+    <string name="doh_failure_dialog_title">Secure DNS (DoH) Unreachable</string>
+    <string name="doh_failure_dialog_desc">The current DoH resolver (%1$s) failed to connect or timed out, possibly due to local network interference. Choose \'Keep\' to protect against DNS leaks, or \'Cancel\' to fall back to cleartext system DNS.</string>
+    <string name="doh_action_keep_secure">Keep (DoH)</string>
+    <string name="doh_action_use_cleartext">Cancel (Use Cleartext)</string>
+    <string name="doh_switched_to_cleartext">Switched to cleartext DNS. Reloading page...</string>
+    <string name="doh_kept_secure">DoH protection retained. Request blocked.</string>
 </resources>

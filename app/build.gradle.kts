@@ -116,7 +116,7 @@ dependencies {
     ksp("androidx.room:room-compiler:$roomVersion")
 
     // DataStore
-    implementation("androidx.datastore:datastore-preferences:1.0.0")
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
 
     // OkHttp for DoH
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

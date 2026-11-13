@@ -176,4 +176,10 @@
     <string name="scan_result_share">分享</string>
     <string name="pm_reencrypt_failed">密码重加密迁移失败，已恢复原设置</string>
     <string name="settings_doh_unsupported">当前系统 WebView 不支持代理重定向，无法启用 DoH</string>
+    <string name="doh_failure_dialog_title">安全 DNS（DoH）连接失败</string>
+    <string name="doh_failure_dialog_desc">当前 DoH 节点（%1$s）无法连通或解析超时，可能是由于本地网络阻断。您可以选择“保留”以避免域名泄露，或“取消”以临时改用运营商明文 DNS。</string>
+    <string name="doh_action_keep_secure">保留（现有DoH）</string>
+    <string name="doh_action_use_cleartext">取消（使用明文）</string>
+    <string name="doh_switched_to_cleartext">已切换为系统明文 DNS，正在重载网页</string>
+    <string name="doh_kept_secure">已维持安全 DoH 设置，连接已安全阻断</string>
 </resources>

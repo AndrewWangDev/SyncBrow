@@ -724,15 +724,16 @@ fun PasswordManagerScreen(navController: NavController) {
                                 showSettingsDialog = false
                             }
                         } else {
-                            // Disabling encryption: Decrypt existing items to plain text so they aren't lost
+                            // Disabling master password protection: Re-encrypt existing items with AndroidKeyStore V1
+                            // to ensure passwords are NEVER stored in raw plain text in SQLite
                             val existingPasswords = passwordDao.getAllPasswordsList()
-                            val plainList = mutableListOf<PasswordEntity>()
+                            val plainList = mutableListOf<Pair<PasswordEntity, String>>()
                             var migrationFailed = false
 
                             for (item in existingPasswords) {
                                 try {
                                     val plain = CryptoManager.decrypt(item.password)
-                                    plainList.add(item.copy(password = plain))
+                                    plainList.add(Pair(item, plain))
                                 } catch (e: Exception) {
                                     migrationFailed = true
                                     break
@@ -746,11 +747,33 @@ fun PasswordManagerScreen(navController: NavController) {
                                 return@launch
                             }
 
-                            if (plainList.isNotEmpty()) {
-                                passwordDao.updatePasswords(plainList)
+                            // Clear sessionKey so CryptoManager.encrypt uses hardware-backed AndroidKeyStore (V1)
+                            CryptoManager.clearSessionKey()
+                            val reEncryptedList = mutableListOf<PasswordEntity>()
+                            for ((item, plain) in plainList) {
+                                try {
+                                    val v1Encrypted = CryptoManager.encrypt(plain)
+                                    reEncryptedList.add(item.copy(password = v1Encrypted))
+                                } catch (e: Exception) {
+                                    migrationFailed = true
+                                    break
+                                }
                             }
 
-                            CryptoManager.clearSessionKey()
+                            if (migrationFailed) {
+                                // Rollback session key
+                                val salt = SettingsRepository.getSaltFromHash(realPasswordHash) ?: "syncbrow_default_salt".toByteArray()
+                                CryptoManager.setSessionPassword(settingsRealPassword, salt)
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(context, context.getString(R.string.pm_reencrypt_failed), Toast.LENGTH_LONG).show()
+                                }
+                                return@launch
+                            }
+
+                            if (reEncryptedList.isNotEmpty()) {
+                                passwordDao.updatePasswords(reEncryptedList)
+                            }
+
                             settingsRepository.setPmEncryptionEnabled(false)
                             settingsRepository.setPmRealPasswordHash("")
                             settingsRepository.setPmEmergencyPasswordHash("")

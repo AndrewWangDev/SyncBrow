@@ -1,11 +1,15 @@
 package com.syncbrow.tool.net
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import androidx.webkit.ProxyConfig
 import androidx.webkit.ProxyController
 import androidx.webkit.WebViewFeature
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import okhttp3.dnsoverhttps.DnsOverHttps
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -14,6 +18,7 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.UnknownHostException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -23,6 +28,12 @@ object LocalDohProxy {
     private const val MAX_LINE_LENGTH = 8192
 
     private class LineTooLongException(message: String) : java.io.IOException(message)
+
+    private val _dohFailureEvent = MutableSharedFlow<String>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val dohFailureEvent = _dohFailureEvent.asSharedFlow()
+
+    @Volatile
+    private var lastFailurePromptTime = 0L
 
     private var serverSocket: ServerSocket? = null
     private var proxyJob: Job? = null
@@ -134,7 +145,13 @@ object LocalDohProxy {
                 val results = doh.lookup(host)
                 if (results.isNotEmpty()) return results
             } catch (e: Exception) {
-                Log.w(TAG, "DoH lookup failed for $host, fallback to default: ${e.message}")
+                Log.w(TAG, "DoH lookup failed for $host: ${e.message}")
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastFailurePromptTime > 30_000L) {
+                    lastFailurePromptTime = now
+                    _dohFailureEvent.tryEmit(host)
+                }
+                throw UnknownHostException("DoH lookup failed for $host: ${e.message}")
             }
         }
         return InetAddress.getAllByName(host).toList()
@@ -156,6 +173,10 @@ object LocalDohProxy {
             if (firstLine.startsWith("CONNECT ", ignoreCase = true)) {
                 // HTTPS CONNECT Tunnel
                 val parts = firstLine.split(" ")
+                if (parts.size < 2) {
+                    client.close()
+                    return@withContext
+                }
                 val hostPort = parts[1]
                 val (host, port) = if (hostPort.contains(":")) {
                     val idx = hostPort.lastIndexOf(":")
@@ -176,6 +197,19 @@ object LocalDohProxy {
                 } catch (e: Exception) {
                     try {
                         outStream.write("HTTP/1.1 504 Gateway Timeout\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
+                        outStream.flush()
+                    } catch (_: Exception) {}
+                    client.close()
+                    return@withContext
+                }
+
+                // Prevent self-looping proxy requests (SEC-02)
+                val currentLocalPort = serverSocket?.localPort ?: -1
+                val isSelfLoop = currentLocalPort != -1 && port == currentLocalPort && targetAddresses.any { it.isLoopbackAddress }
+                if (isSelfLoop) {
+                    Log.w(TAG, "Blocked self-loop proxy CONNECT request to 127.0.0.1:$port")
+                    try {
+                        outStream.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
                         outStream.flush()
                     } catch (_: Exception) {}
                     client.close()
@@ -237,6 +271,19 @@ object LocalDohProxy {
                         } catch (e: Exception) {
                             try {
                                 outStream.write("HTTP/1.1 504 Gateway Timeout\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
+                                outStream.flush()
+                            } catch (_: Exception) {}
+                            client.close()
+                            return@withContext
+                        }
+
+                        // Prevent self-looping proxy requests (SEC-02)
+                        val currentLocalPort = serverSocket?.localPort ?: -1
+                        val isSelfLoop = currentLocalPort != -1 && port == currentLocalPort && targetAddresses.any { it.isLoopbackAddress }
+                        if (isSelfLoop) {
+                            Log.w(TAG, "Blocked self-loop HTTP request to 127.0.0.1:$port")
+                            try {
+                                outStream.write("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
                                 outStream.flush()
                             } catch (_: Exception) {}
                             client.close()
